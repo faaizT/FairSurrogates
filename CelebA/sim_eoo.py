@@ -69,10 +69,11 @@ def calc_loss(data):
     outputs = model(inputs).reshape(-1)
     loss = ploss(outputs, labels) + floss(outputs[labels_bool], sens_attr[labels_bool])
     loss.backward()
-    preds = (outputs >= 0).float()
+    preds_acc = (outputs >= 0).float()
+    preds = torch.sigmoid(outputs)
     unfairness = torch.tensor([preds[ sens_attr & labels_bool].sum(), preds[ sens_attr & labels_bool].shape[0],
                                preds[~sens_attr & labels_bool].sum(), preds[~sens_attr & labels_bool].shape[0]]) #msmiling, m, fsmiling, f
-    return ((labels == preds).float().mean(), loss, unfairness)
+    return ((labels == preds_acc).float().mean(), loss, unfairness)
 
 
 print_every = 200

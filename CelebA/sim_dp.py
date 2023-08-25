@@ -8,6 +8,8 @@ from tqdm import tqdm, trange
 from time import sleep
 from PIL import Image
 from torchvision import transforms
+from torch.utils.data import Dataset
+import os
 
 if len(sys.argv) != 4:
     print("Usage: python simulate.py lambda_fair formulation GPU_index")
@@ -23,19 +25,67 @@ preprocess = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
-trainset = torchvision.datasets.CelebA(root='./data', split='train', target_type='attr', transform=preprocess)
-validset = torchvision.datasets.CelebA(root='./data', split='valid', target_type='attr', transform=preprocess)
-testset  = torchvision.datasets.CelebA(root='./data', split='test',  target_type='attr', transform=preprocess)
+device = torch.device("cuda:" + str(gpui) if torch.cuda.is_available() else "cpu")
+
+import os
+import pandas as pd
+
+from PIL import Image
+
+class SimpleCelebA(Dataset):
+    def __init__(self, root, split='train', target_type='attr', transform=None):
+        super().__init__()
+        self.root = root
+        self.transform = transform
+        
+        # Read the data files
+        attr_data = pd.read_csv(os.path.join(root, 'list_attr_celeba.csv'))
+        partition_data = pd.read_csv(os.path.join(root, 'list_eval_partition.csv'))
+        
+        # Use only the first n-10000 data points
+        n = len(attr_data)
+        target_n = n - 10000
+        attr_data = attr_data.head(target_n)
+        partition_data = partition_data.head(target_n)
+        
+        # Filter based on the provided split
+        split_dict = {'train': 0, 'valid': 1, 'test': 2}
+        partition_data = partition_data[partition_data['partition'] == split_dict[split]]
+        
+        # Merge datasets on image_id and filter attributes
+        self.data = pd.merge(partition_data, attr_data, on='image_id')
+        
+        # Convert attributes from -1 to 0
+        self.data[target_type] = (self.data[target_type] == 1).astype(int)
+        self.attr = torch.FloatTensor(self.data[target_type].values)
+        
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        img_name = os.path.join(self.root, 'img_align_celeba/img_align_celeba', self.data.iloc[idx, 0])
+        image = Image.open(img_name)
+        
+        attrs = self.attr[idx, :]
+        if self.transform:
+            image = self.transform(image)
+            
+        return image, attrs
+
+attrs = '5_o_Clock_Shadow Arched_Eyebrows Attractive Bags_Under_Eyes Bald Bangs Big_Lips Big_Nose Black_Hair Blond_Hair Blurry Brown_Hair Bushy_Eyebrows Chubby Double_Chin Eyeglasses Goatee Gray_Hair Heavy_Makeup High_Cheekbones Male Mouth_Slightly_Open Mustache Narrow_Eyes No_Beard Oval_Face Pale_Skin Pointy_Nose Receding_Hairline Rosy_Cheeks Sideburns Smiling Straight_Hair Wavy_Hair Wearing_Earrings Wearing_Hat Wearing_Lipstick Wearing_Necklace Wearing_Necktie Young '.split()
+
+# Usage
+root_dir = '/root/celeba'
+trainset = SimpleCelebA(root=root_dir, split='train', target_type=attrs, transform=preprocess)
+validset = SimpleCelebA(root=root_dir, split='valid', target_type=attrs, transform=preprocess)
+testset  = SimpleCelebA(root=root_dir, split='test',  target_type=attrs, transform=preprocess)
 
 trainloader = torch.utils.data.DataLoader(trainset, batch_size=32, shuffle=True, num_workers=2)
 validloader = torch.utils.data.DataLoader(validset, batch_size=32, shuffle=True, num_workers=2)
 testloader  = torch.utils.data.DataLoader(testset,  batch_size=32, shuffle=False, num_workers=2)
 
-attrs = '5_o_Clock_Shadow Arched_Eyebrows Attractive Bags_Under_Eyes Bald Bangs Big_Lips Big_Nose Black_Hair Blond_Hair Blurry Brown_Hair Bushy_Eyebrows Chubby Double_Chin Eyeglasses Goatee Gray_Hair Heavy_Makeup High_Cheekbones Male Mouth_Slightly_Open Mustache Narrow_Eyes No_Beard Oval_Face Pale_Skin Pointy_Nose Receding_Hairline Rosy_Cheeks Sideburns Smiling Straight_Hair Wavy_Hair Wearing_Earrings Wearing_Hat Wearing_Lipstick Wearing_Necklace Wearing_Necktie Young '.split()
-
-model = torch.hub.load('pytorch/vision:v0.6.0', 'wide_resnet50_2', pretrained=False) #pretrained = True if you want
+model = torch.hub.load('pytorch/vision:v0.6.0', 'wide_resnet50_2', weights=None) #pretrained = True if you want
 model.fc = nn.Linear(2048, 1, bias=True)
-model.load_state_dict(torch.load("baseline"))
 
 ti = attrs.index("Smiling")
 si = attrs.index("Male")
@@ -57,7 +107,6 @@ else:
 optimizer = optim.Adam(model.parameters(), lr=0.01)
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', verbose=True)
 
-device = torch.device("cuda:" + str(gpui) if torch.cuda.is_available() else "cpu")
 model.to(device)
 torch.cuda.empty_cache()
 
