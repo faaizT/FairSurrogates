@@ -86,7 +86,7 @@ si = attrs.index("Male")
 
 ploss = nn.BCEWithLogitsLoss()
 lam_fair = 0
-form = "logistic"
+form = "linear"
 if form == "logistic":
     def floss(outputs, sens_attr):
         return -lam_fair/32 * (F.logsigmoid(outputs[sens_attr]).sum()/Pmale + F.logsigmoid(-outputs[~sens_attr]).sum()/Pfem)
@@ -115,41 +115,41 @@ def calc_loss(data):
     return ((labels == preds_acc).float().mean(), loss, unfairness, pred_loss, runfairness)
 
 with torch.cuda.device('cuda:0'):
-    lfs = np.array([0.  , 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1 ,
-       0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.2 ])
+    lfs = list(np.linspace(0, 0.5, num=11).round(2))
+    seeds = [2, 3, 4]
     df = pd.DataFrame(columns = ['Lam_fair', 'Accuracy', 'unfairness', 'Loss',"LL"])
     for lam_fair in lfs:
-        model_path = "/root/model_results_sim_eoo-celeba-fairsurrogates/model_logistic_" + str(lam_fair) + "_1_eop.pth"
-        if os.path.exists(model_path):
-            model.load_state_dict(torch.load(model_path))
-            torch.cuda.empty_cache()
-            iterator = iter(testloader)
-            N = iterator.__len__()
-            running_loss = 0.0
-            running_acc = 0.0
-            running_unfair = 0.0
-            running_runfair = 0.0
-            running_predloss = 0.0
-            with torch.no_grad():
-                for i in trange(N):
-                    # get the inputs; data is a list of [inputs, labels]
-                    (acc, loss, unfair, pred_loss, runfair) = calc_loss(next(iterator))
+        for seed in seeds:
+            if os.path.exists(f"../model_results_celeba-fairsurrogates_{form}_abs/model_{form}_{lam_fair}_{seed}_eop.pth"):
+                model.load_state_dict(torch.load(f"../model_results_celeba-fairsurrogates_{form}_abs/model_{form}_{lam_fair}_{seed}_eop.pth"))
+                torch.cuda.empty_cache()
+                iterator = iter(testloader)
+                N = iterator.__len__()
+                running_loss = 0.0
+                running_acc = 0.0
+                running_unfair = 0.0
+                running_runfair = 0.0
+                running_predloss = 0.0
+                with torch.no_grad():
+                    for i in trange(N):
+                        # get the inputs; data is a list of [inputs, labels]
+                        (acc, loss, unfair, pred_loss, runfair) = calc_loss(next(iterator))
 
-                    # print statistics
-                    running_loss += loss.item()
-                    running_acc += acc.item()
-                    running_unfair += unfair
-                    running_runfair += runfair
-                    running_predloss += pred_loss.item()
+                        # print statistics
+                        running_loss += loss.item()
+                        running_acc += acc.item()
+                        running_unfair += unfair
+                        running_runfair += runfair
+                        running_predloss += pred_loss.item()
 
-                d = {"Lam_fair": lam_fair,
-                    "Accuracy": (running_acc / N), 
-                    "unfairness": (running_unfair[2]/running_unfair[3] - running_unfair[0]/running_unfair[1]).item(),
-                    "Runfairness": (running_runfair[2]/running_runfair[3] - running_runfair[0]/running_runfair[1]).item(),
-                    "Loss": (running_loss / N),
-                    "LL": -(running_predloss / N)}
-                for k in d:
-                    d[k] = list([d[k]])
-                d = pd.DataFrame(data = d)
-            df = pd.concat([df, d], ignore_index=True) 
-    df.to_csv("logistic_eoo_test.csv")
+                    d = {"Lam_fair": lam_fair,
+                        "Accuracy": (running_acc / N), 
+                        "unfairness": (running_unfair[2]/running_unfair[3] - running_unfair[0]/running_unfair[1]).item(),
+                        "Runfairness": (running_runfair[2]/running_runfair[3] - running_runfair[0]/running_runfair[1]).item(),
+                        "Loss": (running_loss / N),
+                        "LL": -(running_predloss / N)}
+                    for k in d:
+                        d[k] = list([d[k]])
+                    d = pd.DataFrame(data = d)
+                df = pd.concat([df, d], ignore_index=True) 
+    df.to_csv(f"./celeba_{form}_eop_test.csv")

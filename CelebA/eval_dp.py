@@ -7,6 +7,7 @@ from tqdm import tqdm, trange
 from time import sleep
 from PIL import Image
 from torchvision import transforms
+from torch.utils.data import Dataset
 import numpy as np
 import pandas as pd
 
@@ -17,12 +18,56 @@ preprocess = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
-trainset = torchvision.datasets.CelebA(root='./data', split='train', target_type='attr', transform=preprocess)
-validset = torchvision.datasets.CelebA(root='./data', split='valid', target_type='attr', transform=preprocess)
-testset  = torchvision.datasets.CelebA(root='./data', split='test',  target_type='attr', transform=preprocess)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-trainloader = torch.utils.data.DataLoader(trainset, batch_size=32, shuffle=True, num_workers=2)
-validloader = torch.utils.data.DataLoader(validset, batch_size=32, shuffle=True, num_workers=2)
+import os
+import pandas as pd
+
+from PIL import Image
+
+class SimpleCelebA(Dataset):
+    def __init__(self, root, split='train', target_type='attr', transform=None):
+        super().__init__()
+        self.root = root
+        self.transform = transform
+        
+        # Read the data files
+        attr_data = pd.read_csv(os.path.join(root, 'list_attr_celeba.csv'))
+        partition_data = pd.read_csv(os.path.join(root, 'list_eval_partition.csv'))
+        
+        # Use only the first n-10000 data points
+        attr_data = attr_data.tail(10000)
+        partition_data = partition_data.tail(10000)
+        
+        # Filter based on the provided split
+        # split_dict = {'train': 0, 'valid': 1, 'test': 2}
+        # partition_data = partition_data[partition_data['partition'] == split_dict[split]]
+        
+        # Merge datasets on image_id and filter attributes
+        self.data = pd.merge(partition_data, attr_data, on='image_id')
+        
+        # Convert attributes from -1 to 0
+        self.data[target_type] = (self.data[target_type] == 1).astype(int)
+        self.attr = torch.FloatTensor(self.data[target_type].values)
+        
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        img_name = os.path.join(self.root, 'img_align_celeba/img_align_celeba', self.data.iloc[idx, 0])
+        image = Image.open(img_name)
+        
+        attrs = self.attr[idx, :]
+        if self.transform:
+            image = self.transform(image)
+            
+        return image, attrs
+
+attrs = '5_o_Clock_Shadow Arched_Eyebrows Attractive Bags_Under_Eyes Bald Bangs Big_Lips Big_Nose Black_Hair Blond_Hair Blurry Brown_Hair Bushy_Eyebrows Chubby Double_Chin Eyeglasses Goatee Gray_Hair Heavy_Makeup High_Cheekbones Male Mouth_Slightly_Open Mustache Narrow_Eyes No_Beard Oval_Face Pale_Skin Pointy_Nose Receding_Hairline Rosy_Cheeks Sideburns Smiling Straight_Hair Wavy_Hair Wearing_Earrings Wearing_Hat Wearing_Lipstick Wearing_Necklace Wearing_Necktie Young '.split()
+
+# Usage
+root_dir = '/root/celeba'
+testset  = SimpleCelebA(root=root_dir, split='test',  target_type=attrs, transform=preprocess)
 testloader  = torch.utils.data.DataLoader(testset,  batch_size=32, shuffle=False, num_workers=2)
 
 attrs = '5_o_Clock_Shadow Arched_Eyebrows Attractive Bags_Under_Eyes Bald Bangs Big_Lips Big_Nose Black_Hair Blond_Hair Blurry Brown_Hair Bushy_Eyebrows Chubby Double_Chin Eyeglasses Goatee Gray_Hair Heavy_Makeup High_Cheekbones Male Mouth_Slightly_Open Mustache Narrow_Eyes No_Beard Oval_Face Pale_Skin Pointy_Nose Receding_Hairline Rosy_Cheeks Sideburns Smiling Straight_Hair Wavy_Hair Wearing_Earrings Wearing_Hat Wearing_Lipstick Wearing_Necklace Wearing_Necktie Young '.split()
@@ -30,7 +75,6 @@ attrs = '5_o_Clock_Shadow Arched_Eyebrows Attractive Bags_Under_Eyes Bald Bangs 
 model = torch.hub.load('pytorch/vision:v0.6.0', 'wide_resnet50_2', pretrained=False)
 model.fc = nn.Linear(2048, 1, bias=True)
 
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
 ti = attrs.index("Smiling")
@@ -59,39 +103,41 @@ def calc_loss(data):
     pred_loss = ploss(outputs, labels)
     loss = pred_loss + floss(outputs, sens_attr)
 #     loss.backward()
-    preds = (outputs >= 0).float()
+    preds_acc = (outputs >= 0).float()
+    preds = torch.sigmoid(outputs)
     unfairness = torch.tensor([preds[ sens_attr].sum(), preds[ sens_attr].shape[0],
                                preds[~sens_attr].sum(), preds[~sens_attr].shape[0]]) #msmiling, m, fsmiling, f
-    return ((labels == preds).float().mean(), loss, unfairness, pred_loss)
+    return ((labels == preds_acc).float().mean(), loss, unfairness, pred_loss)
 
-with torch.cuda.device('cuda:1'):
-    lfs = np.array([0.   , 0.003, 0.006, 0.009, 0.012, 0.015, 0.018, 0.021, 0.024,
-        0.027, 0.03 , 0.033, 0.036, 0.039, 0.042, 0.045, 0.048, 0.051,
-        0.054, 0.057, 0.06 ])
-    df = pd.DataFrame(columns = ['Lam_fair', 'Accuracy', 'Unfairness', 'Loss',"LL"])
-    for lam_fair in lfs:
-        model.load_state_dict(torch.load("sims/linear" + str(lam_fair)))
-        torch.cuda.empty_cache()
-        iterator = testloader.__iter__()
-        N = iterator.__len__()
-        running_loss = 0.0
-        running_acc = 0.0
-        running_unfair = 0.0
-        running_predloss = 0.0
-        with torch.no_grad():
-            for i in trange(N):
-                # get the inputs; data is a list of [inputs, labels]
-                (acc, loss, unfair, pred_loss) = calc_loss(iterator.next())
+lfs = list(np.linspace(0, 0.5, num=11).round(2))
+seeds = [2, 3, 4]
+df = pd.DataFrame(columns = ['Lam_fair', 'Accuracy', 'Unfairness', 'Loss',"LL"])
+for lam_fair in lfs:
+    for seed in seeds:
+        if os.path.exists(f"../model_results_celeba-fairsurrogates_{form}_abs/model_{form}_{lam_fair}_{seed}_dp.pth"):
+            model.load_state_dict(torch.load(f"../model_results_celeba-fairsurrogates_{form}_abs/model_{form}_{lam_fair}_{seed}_dp.pth"))
+            torch.cuda.empty_cache()
+            iterator = iter(testloader)
+            N = iterator.__len__()
+            running_loss = 0.0
+            running_acc = 0.0
+            running_unfair = 0.0
+            running_predloss = 0.0
+            with torch.no_grad():
+                for i in trange(N):
+                    # get the inputs; data is a list of [inputs, labels]
+                    (acc, loss, unfair, pred_loss) = calc_loss(next(iterator))
 
-                # print statistics
-                running_loss += loss.item()
-                running_acc += acc.item()
-                running_unfair += unfair
-                running_predloss += pred_loss.item()
-            d = {"Lam_fair": lam_fair,
-                 "Accuracy": (running_acc / N), 
-                 "Unfairness": (running_unfair[2]/running_unfair[3] - running_unfair[0]/running_unfair[1]).item(),
-                 "Loss": (running_loss / N),
-                 "LL": -(running_predloss / N)}
-        df = df.append(d,ignore_index=True)
-    df.to_csv("linear.csv")
+                    # print statistics
+                    running_loss += loss.item()
+                    running_acc += acc.item()
+                    running_unfair += unfair
+                    running_predloss += pred_loss.item()
+                d = {"Lam_fair": [lam_fair],
+                    "Accuracy": [(running_acc / N)], 
+                    "Unfairness": [np.abs((running_unfair[2]/running_unfair[3] - running_unfair[0]/running_unfair[1]).item())],
+                    "Loss": [(running_loss / N)],
+                    "LL": [-(running_predloss / N)]}
+            df = pd.concat([pd.DataFrame(d), df], ignore_index=True)
+        # df = df.append(d,ignore_index=True)
+df.to_csv(f"celeba_{form}_dp_test.csv")
